@@ -1,0 +1,107 @@
+# =========================
+# IDE / Editors
+# =========================
+.idea/
+.vscode/
+.cursor/
+.project
+.pydevproject
+.ropeproject
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+
+# =========================
+# Python Environments
+# =========================
+venv/
+.venv/
+env/
+.python-version
+
+# =========================
+# Python Cache / Compiled
+# =========================
+__pycache__/
+*.py[cod]
+*.so
+
+# =========================
+# Tooling Cache
+# =========================
+.ruff_cache/
+.pytest_cache/
+.tox/
+.cache/
+
+# =========================
+# Coverage / Test Reports
+# =========================
+.coverage
+coverage.xml
+nosetests.xml
+
+# =========================
+# Packaging / Build Artifacts
+# =========================
+bin/
+build/
+develop-eggs/
+dist/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg
+*.egg-info/
+.installed.cfg
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+/logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =========================
+# Documentation
+# =========================
+docs/_build/
+
+# =========================
+# Translations
+# =========================
+*.mo
+*.pot
+
+# =========================
+# Local Config / Secrets
+# =========================
+.env
+
+# =========================
+# Project-Specific
+# =========================
+.claude/
+.serena/
+.agents/
+.superpowers/
+superpowers/
+.docker-cache/
+/load/
+
+copy_project_files.py
+test_file.py
+
+# =========================
+# Misc
+# =========================
+.mr.developer.cfg
+/тз.pdf
+/active_worker.py

@@ -1,0 +1,15 @@
+{
+  "error": {
+    "codes": {
+      "NOT_FOUND": "Resource not found",
+      "ALREADY_EXISTS": "Resource already exists",
+      "IDEMPOTENCY_CONFLICT": "Idempotency conflict",
+      "INVALID_STATE_TRANSITION": "Invalid state transition",
+      "VALIDATION_ERROR": "Validation error",
+      "DOMAIN_ERROR": "Domain error"
+    }
+  },
+  "validation": {
+    "required": "Field is required"
+  }
+}

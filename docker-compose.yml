@@ -1,0 +1,188 @@
+name: basis-test
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pyostr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-demo_platform_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pyostr} -d ${POSTGRES_DB:-demo_platform_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    # Без внешних портов: доступ только внутри сети compose.
+    # Web-management → http://rabbitmq.localhost:8601 через nginx.
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pyostr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-demo_platform_db}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      STRICT_STARTUP: "true"
+      DOCS_ENABLED: "true"
+    # → http://api.localhost
+    # ports:
+    #   - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m src.main"
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pyostr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-demo_platform_db}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["migrate"]
+
+  consumer:
+    build:
+      context: .
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pyostr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-demo_platform_db}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      GATEWAY_MIN_DELAY: ${GATEWAY_MIN_DELAY:-2.0}
+      GATEWAY_MAX_DELAY: ${GATEWAY_MAX_DELAY:-5.0}
+      GATEWAY_FAILURE_RATE: ${GATEWAY_FAILURE_RATE:-0.1}
+      WEBHOOK_RETRY_ATTEMPTS: ${WEBHOOK_RETRY_ATTEMPTS:-3}
+      WEBHOOK_RETRY_BASE_DELAY: ${WEBHOOK_RETRY_BASE_DELAY:-1.0}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-webhook-dev-secret}
+      RABBITMQ_MAX_RETRIES: ${RABBITMQ_MAX_RETRIES:-3}
+      METRICS_PORT: 8001
+      OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-1.0}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+    # → http://consumer.localhost/metrics
+    # ports:
+    #   - "${CONSUMER_METRICS_PORT:-8001}:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: ["python", "-m", "src.runtime.bootstrap.worker_main"]
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-pyostr}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-demo_platform_db}?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    # → http://prometheus.localhost
+    # ports:
+    #   - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - api
+      - consumer
+      - postgres-exporter
+      - rabbitmq
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.3.2
+    command: -config.file=/etc/loki/local-config.yml
+    volumes:
+      - ./deploy/loki/loki-config.yml:/etc/loki/local-config.yml:ro
+      - loki_data:/loki
+    # → http://loki.localhost
+    # ports:
+    #   - "${LOKI_PORT:-3100}:3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    volumes:
+      - ./deploy/promtail/promtail.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.6.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./deploy/grafana-provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    # → http://grafana.localhost
+    # ports:
+    #   - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/index.html:/usr/share/nginx/html/index.html:ro
+    # Единственный сервис с внешним портом (8601).
+    ports:
+      - "${NGINX_PORT:-8601}:80"
+    depends_on:
+      - api
+      - consumer
+      - prometheus
+      - grafana
+      - loki
+      - rabbitmq
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  prometheus_data:
+  loki_data:
+  grafana_data:

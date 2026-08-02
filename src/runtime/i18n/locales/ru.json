@@ -1,0 +1,15 @@
+{
+  "error": {
+    "codes": {
+      "NOT_FOUND": "Ресурс не найден",
+      "ALREADY_EXISTS": "Ресурс уже существует",
+      "IDEMPOTENCY_CONFLICT": "Конфликт идемпотентности",
+      "INVALID_STATE_TRANSITION": "Недопустимый переход статуса",
+      "VALIDATION_ERROR": "Ошибка валидации",
+      "DOMAIN_ERROR": "Ошибка домена"
+    }
+  },
+  "validation": {
+    "required": "Поле обязательно"
+  }
+}

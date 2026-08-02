@@ -1,0 +1,14 @@
+# Провайдер панелей Grafana: автоимпорт дашбордов из каталога контейнера.
+apiVersion: 1
+
+providers:
+  - name: default
+    orgId: 1
+    folder: Payments
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
