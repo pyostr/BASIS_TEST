@@ -19,42 +19,42 @@ jobs:
   ############################################################
   # TESTS (pytest + testcontainers; нужен Docker на раннере)
   ############################################################
-#  tests:
-#    runs-on: ubuntu-latest
-#
-#    # Settings требует эти переменные (нет дефолтов);
-#    # тесты ходят в testcontainers.
-#    env:
-#      POSTGRES_USER: test
-#      POSTGRES_PASSWORD: test
-#      POSTGRES_DB: test
-#
-#    steps:
-#      - uses: actions/checkout@v4
-#
-#      # Poetry нужен до setup-python: с cache: "poetry" action вызывает poetry для расчёта cache key.
-#      - name: Install Poetry
-#        run: pipx install poetry==2.4.1
-#
-#      - uses: actions/setup-python@v5
-#        with:
-#          python-version: "3.12"
-#          cache: "poetry"
-#
-#      - name: Install dependencies
-#        run: poetry install --no-interaction --no-ansi --no-root
-#
-#      - name: Lint
-#        run: poetry run ruff check src tests
-#
-#      - name: Run tests
-#        run: poetry run pytest -q
+  tests:
+    runs-on: ubuntu-latest
+
+    # Settings требует эти переменные (нет дефолтов);
+    # тесты ходят в testcontainers.
+    env:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Poetry нужен до setup-python: с cache: "poetry" action вызывает poetry для расчёта cache key.
+      - name: Install Poetry
+        run: pipx install poetry==2.4.1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "poetry"
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-ansi --no-root
+
+      - name: Lint
+        run: poetry run ruff check src tests
+
+      - name: Run tests
+        run: poetry run pytest -q
 
   ############################################################
   # BUILD (Dockerfile -> registry: $sha и latest)
   ############################################################
   build:
-#    needs: tests
+    needs: tests
     runs-on: ubuntu-latest
 
     steps:
@@ -85,7 +85,7 @@ jobs:
   # DEPLOY (Blue-Green Zero Downtime)
   ############################################################
   deploy:
-#    needs: build
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
