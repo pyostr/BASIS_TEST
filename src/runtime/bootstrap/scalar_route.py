@@ -21,7 +21,7 @@ def register_scalar_route(app: FastAPI, settings: Settings) -> None:
             title=settings.APP_NAME,
             sources=[
                 OpenAPISource(
-                    title='User API',
+                    title='API Платежей',
                     url='/openapi.json',
                     default=True,
                     agent=AgentScalarConfig(disabled=True),
