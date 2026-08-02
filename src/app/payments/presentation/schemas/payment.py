@@ -19,11 +19,11 @@ class CreatePaymentRequest(BaseModel):
     через заголовок ``Idempotency-Key``, а не в теле.
     """
 
-    amount: Decimal = Field(gt=0, decimal_places=2)
+    amount: Decimal = Field(default=10000, gt=0, decimal_places=2)
     currency: Currency
-    description: str | None = Field(default=None, max_length=1024)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    webhook_url: str
+    description: str | None = Field(default='Оплата', max_length=1024)
+    metadata: dict[str, Any] = Field(default={'user_id': 100})
+    webhook_url: str = 'https://smee.io/QdTdSWuNct1STc1'
 
     @field_validator('webhook_url')
     @classmethod
