@@ -74,6 +74,7 @@ class Settings(BaseSettings):
 
     RABBITMQ_RETRY_TTL_MS: int = 5000
     RABBITMQ_MAX_RETRIES: int = 3
+    RABBITMQ_PUBLISH_TIMEOUT: float = 5.0
 
     # ----------------------------
     # ВОРКЕР OUTBOX
@@ -89,6 +90,7 @@ class Settings(BaseSettings):
     WEBHOOK_RETRY_BASE_DELAY: float = 1.0
     WEBHOOK_TIMEOUT: float = 10.0
     WEBHOOK_POLL_INTERVAL: float = 1.0
+    WEBHOOK_CONCURRENCY: int = 10
 
     # ----------------------------
     # ПЛАТЁЖНЫЙ ШЛЮЗ (эмулятор)

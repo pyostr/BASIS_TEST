@@ -10,6 +10,7 @@
 3. Поля для схем API имеют значения по умолчанию
 
 Просто для удобства просмотра и теста
+Так же работает воркер для имитации проведения платежей (до 1200 запросов в час)
 
 ## Документация
 
@@ -43,14 +44,14 @@
 
 ## Продакшен (уже развёрнуто)
 
-| Что                            | URL                                                |
-|--------------------------------|----------------------------------------------------|
-| Документация API (Scalar)      | https://demo-market.ru/scalar                      |
-| API (корневой адрес)           | https://demo-market.ru/api/v1                      |
-| Дашборды Grafana               | https://grafana.demo-market.ru/dashboards          |
-| Дашборд «Payments Overview»    | https://grafana.demo-market.ru/d/payments-overview |
-| Healthcheck                    | https://demo-market.ru/healthz                     |
-| Вебхук уведомлений платежа     | https://smee.io/QdTdSWuNct1STc1                    |
+| Что                                 | URL                                                |
+|-------------------------------------|----------------------------------------------------|
+| Документация API (Scalar)           | https://demo-market.ru/scalar                      |
+| API (корневой адрес)                | https://demo-market.ru/api/v1                      |
+| Дашборды Grafana (admin / admin123) | https://grafana.demo-market.ru/dashboards          |
+| Дашборд «Payments Overview»         | https://grafana.demo-market.ru/d/payments-overview |
+| Healthcheck                         | https://demo-market.ru/healthz                     |
+| Вебхук уведомлений платежа          | https://smee.io/QdTdSWuNct1STc1                    |
 
 В проде API работает по **blue-green** схеме (два контейнера, ротация без простоя),
 все внутренние сервисы (БД, RabbitMQ, consumer, Prometheus, Loki, Grafana) наружу

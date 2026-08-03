@@ -94,7 +94,6 @@ docs/_build/
 .superpowers/
 superpowers/
 .docker-cache/
-/load/
 
 copy_project_files.py
 test_file.py
@@ -104,4 +103,4 @@ test_file.py
 # =========================
 .mr.developer.cfg
 /тз.pdf
-/active_worker.py
+/load/

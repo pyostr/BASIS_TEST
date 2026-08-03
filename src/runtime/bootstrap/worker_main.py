@@ -79,6 +79,7 @@ async def main() -> None:
             max_attempts=settings.WEBHOOK_RETRY_ATTEMPTS,
             base_delay=settings.WEBHOOK_RETRY_BASE_DELAY,
         ),
+        concurrency=settings.WEBHOOK_CONCURRENCY,
     )
     webhook_worker = WebhookWorker(
         deliver_handler=deliver_webhooks,

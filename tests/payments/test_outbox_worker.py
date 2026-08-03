@@ -1,6 +1,8 @@
 """Тесты outbox-воркера, который публикует outbox-сообщения в брокер
 и помечает их обработанными."""
 
+import asyncio
+
 from tests.payments.fakes import FakeBroker
 from tests.payments.helpers import NOW
 
@@ -40,6 +42,13 @@ async def _count(sessionmaker, table: str) -> int:
 
         result = await session.execute(text(f'SELECT count(*) FROM {table}'))
         return result.scalar_one()
+
+
+class _HangingBroker:
+    """Брокер, у которого publish никогда не завершается сам по себе."""
+
+    async def publish(self, message, **kwargs) -> None:
+        await asyncio.sleep(60)
 
 
 class TestOutboxWorker:
@@ -101,3 +110,20 @@ class TestOutboxWorker:
         await worker._publish_batch()
 
         assert broker.published == []
+
+    async def test_hanging_publish_hits_timeout(self, sessionmaker):
+        """Зависшая публикация прерывается по таймауту и сообщение остаётся необработанным."""
+        [msg_id] = await _seed_outbox(sessionmaker)
+        worker = OutboxWorker(
+            sessionmaker,
+            _HangingBroker(),
+            Settings(RABBITMQ_PUBLISH_TIMEOUT=0.01),
+        )
+
+        await worker._publish_batch()
+
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row is not None
+            assert row.attempts == 1
+            assert row.processed_at is None

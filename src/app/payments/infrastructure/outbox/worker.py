@@ -65,13 +65,16 @@ class OutboxWorker:
                 # Сообщения, публикация которых не удалась, сохраняют processed_at = NULL
                 # (увеличивается только attempts), чтобы следующий опрос снова их захватил.
                 try:
-                    await self._broker.publish(
-                        message=message.payload,
-                        exchange=exchange,
-                        routing_key=self._settings.RABBITMQ_ROUTING_KEY,
-                        correlation_id=message.correlation_id,
-                        message_id=str(message.id),
-                        headers={'request_id': message.correlation_id or ''},
+                    await asyncio.wait_for(
+                        self._broker.publish(
+                            message=message.payload,
+                            exchange=exchange,
+                            routing_key=self._settings.RABBITMQ_ROUTING_KEY,
+                            correlation_id=message.correlation_id,
+                            message_id=str(message.id),
+                            headers={'request_id': message.correlation_id or ''},
+                        ),
+                        timeout=self._settings.RABBITMQ_PUBLISH_TIMEOUT,
                     )
                 except Exception as exc:
                     logger.warning(
