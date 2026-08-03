@@ -115,15 +115,25 @@ POST /api/v1/payments
 
 ```
 OutboxWorker.run() — цикл с периодом OUTBOX_POLL_INTERVAL
-  → claim_batch()   (FOR UPDATE SKIP LOCKED, processed_at IS NULL)
-  → publish в exchange payments.exchange, routing_key payments.new
-      ├─ успех → mark_processed() (processed_at = now)
-      └─ сбой → mark_publish_failure() (attempts+1, processed_at остаётся NULL)
-  → uow.commit()
+  → release_expired_claims()  (status=processing, claimed_at < now − OUTBOX_CLAIM_TIMEOUT)
+  → claim_batch()             (UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED);
+                               pending + next_retry_at ≤ now → processing,
+                               attempts+1, claimed_at/claimed_by = этот воркер)
+  → uow.commit()              (захват — короткая транзакция без сетевых вызовов)
+  → publish в exchange payments.exchange, routing_key payments.new (вне транзакции)
+      ├─ успех → mark_processed()   (только владелец: status=processing ∧ claimed_by=id;
+      │                              processed_at = now)
+      └─ сбой → mark_publish_failure() (только владелец; lease снимается;
+                                        attempts < max → pending + next_retry_at (backoff),
+                                        attempts ≥ max → dead)
+  → uow.commit()              (фиксация результатов публикации)
 ```
 
 Семантика **at-least-once**: сообщение, которое не удалось опубликовать,
-будет захвачено снова при следующем опросе.
+будет захвачено снова при следующем опросе. **Lease** защищает от двойной
+обработки конкурентными воркерами: каждое сообщение одновременно держит только
+один воркер (status=processing + claimed_by), а зависшие захваты возвращаются
+в pending через `OUTBOX_CLAIM_TIMEOUT` секунд.
 
 ### 3. Обработка платежа (consumer)
 

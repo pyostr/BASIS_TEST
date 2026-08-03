@@ -1,7 +1,7 @@
 """SQLAlchemy-репозиторий для сообщений outbox (адаптер порта домена)."""
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import bindparam, case, func, or_, select, update
@@ -11,6 +11,10 @@ from sqlalchemy.types import DateTime as DateTimeType
 from src.app.payments.domain.repositories.outbox import OutboxMessage
 from src.app.payments.infrastructure.mappers.outbox import to_domain
 from src.app.payments.infrastructure.models.outbox_message import OutboxMessageModel
+
+PENDING = 'pending'
+PROCESSING = 'processing'
+DEAD = 'dead'
 
 
 class SqlAlchemyOutboxRepository:
@@ -23,17 +27,42 @@ class SqlAlchemyOutboxRepository:
     def _session(self) -> AsyncSession:
         return self._session_factory()
 
-    async def claim_batch(self, limit: int, now: datetime) -> list[OutboxMessage]:
-        """Забирает до ``limit`` активных сообщений, чей ``next_retry_at`` наступил.
+    async def release_expired_claims(self, now: datetime, timeout: int) -> None:
+        """Возвращает просроченные lease в статус ``pending``.
 
-        ``FOR UPDATE SKIP LOCKED`` позволяет конкурентным воркерам захватывать
-        непересекающиеся пакеты, не блокируя друг друга.
+        Упавший воркер (claim без mark) блокирует сообщение не дольше, чем на
+        ``timeout`` секунд, после чего оно снова доступно для захвата.
         """
-        result = await self._session.execute(
-            select(OutboxMessageModel)
+        cutoff = now - timedelta(seconds=timeout)
+        await self._session.execute(
+            update(OutboxMessageModel)
             .where(
+                OutboxMessageModel.status == PROCESSING,
+                OutboxMessageModel.claimed_at.is_not(None),
+                OutboxMessageModel.claimed_at < cutoff,
+            )
+            .values(
+                status=PENDING,
+                claimed_at=None,
+                claimed_by=None,
+            )
+        )
+
+    async def claim_batch(
+        self, limit: int, now: datetime, worker_id: UUID
+    ) -> list[OutboxMessage]:
+        """Атомарно захватывает до ``limit`` активных сообщений.
+
+        Подзапрос выбирает ``pending``-сообщения с наступившим ``next_retry_at``
+        и блокирует их ``FOR UPDATE SKIP LOCKED`` (конкурентные воркеры получают
+        непересекающиеся пакеты), затем единственное ``UPDATE`` переводит их в
+        ``processing`` с владельцем, отметкой времени и инкрементом ``attempts``.
+        """
+        subquery = (
+            select(OutboxMessageModel.id)
+            .where(
+                OutboxMessageModel.status == PENDING,
                 OutboxMessageModel.processed_at.is_(None),
-                OutboxMessageModel.status == 'pending',
                 or_(
                     OutboxMessageModel.next_retry_at.is_(None),
                     OutboxMessageModel.next_retry_at <= now,
@@ -43,20 +72,31 @@ class SqlAlchemyOutboxRepository:
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
-        return [to_domain(row) for row in result.scalars()]
+        result = await self._session.scalars(
+            update(OutboxMessageModel)
+            .where(OutboxMessageModel.id.in_(subquery))
+            .values(
+                status=PROCESSING,
+                claimed_at=now,
+                claimed_by=worker_id,
+                attempts=OutboxMessageModel.attempts + 1,
+            )
+            .returning(OutboxMessageModel)
+        )
+        return [to_domain(row) for row in result.all()]
 
-    async def mark_processed(self, message_id: UUID) -> None:
-        """Помечает сообщение как успешно опубликованное (устанавливает processed_at).
+    async def mark_processed(self, message_id: UUID, worker_id: UUID) -> None:
+        """Помечает своё захваченное сообщение как успешно опубликованное.
 
-        Условное обновление защищает от повторной пометки, если другой воркер
-        успел обработать строку между захватом и публикацией.
+        Условное обновление гарантирует, что помечает только воркер-владелец
+        (``claimed_by``), и не трогает строки, уже снятые по lease.
         """
         await self._session.execute(
             update(OutboxMessageModel)
             .where(
                 OutboxMessageModel.id == message_id,
-                OutboxMessageModel.processed_at.is_(None),
-                OutboxMessageModel.status == 'pending',
+                OutboxMessageModel.status == PROCESSING,
+                OutboxMessageModel.claimed_by == worker_id,
             )
             .values(processed_at=func.now())
         )
@@ -65,16 +105,17 @@ class SqlAlchemyOutboxRepository:
         self,
         message_id: UUID,
         *,
+        worker_id: UUID,
         max_attempts: int,
         next_retry_at: datetime | None,
     ) -> None:
-        """Увеличивает счётчик попыток и откладывает повторный захват.
+        """Возвращает своё сообщение в очередь или переводит в ``dead``.
 
-        При достижении ``max_attempts`` переводит сообщение в статус ``dead``;
-        решение принимается по ``attempts`` в БД атомарно, чтобы конкурентные
-        воркеры не могли обойти лимит попыток.
+        Если ``attempts`` ещё не достигли ``max_attempts``, сообщение становится
+        ``pending`` с ``next_retry_at``; иначе — ``dead``. Lease снимается в обоих
+        случаях. Решение по лимиту принимается по ``attempts`` в БД атомарно.
         """
-        exceeded = OutboxMessageModel.attempts + 1 >= max_attempts
+        exceeded = OutboxMessageModel.attempts >= max_attempts
         next_retry = bindparam(
             'next_retry_at',
             value=next_retry_at,
@@ -84,12 +125,13 @@ class SqlAlchemyOutboxRepository:
             update(OutboxMessageModel)
             .where(
                 OutboxMessageModel.id == message_id,
-                OutboxMessageModel.processed_at.is_(None),
-                OutboxMessageModel.status == 'pending',
+                OutboxMessageModel.status == PROCESSING,
+                OutboxMessageModel.claimed_by == worker_id,
             )
             .values(
-                attempts=OutboxMessageModel.attempts + 1,
-                status=case((exceeded, 'dead'), else_='pending'),
+                status=case((exceeded, DEAD), else_=PENDING),
+                claimed_at=None,
+                claimed_by=None,
                 next_retry_at=case((exceeded, None), else_=next_retry),
             )
         )

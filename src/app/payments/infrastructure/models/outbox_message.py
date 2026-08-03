@@ -14,15 +14,16 @@ from src.runtime.persistence.base import Base
 class OutboxMessageModel(Base):
     """ORM-строка сохранённого доменного события, ожидающего публикации в брокер.
 
-    ``status`` переходит в ``dead``, когда ``attempts`` достигает
-    ``OUTBOX_MAX_ATTEMPTS``; ``next_retry_at`` откладывает повторный захват
-    (экспоненциальный backoff). ``processed_at`` отмечает успешную публикацию;
-    индекс (status, next_retry_at, created_at) поддерживает запрос захвата воркером.
+    ``status`` переходит из ``pending`` в ``processing`` при захвате воркером
+    (lease: claimed_at/claimed_by), а после исчерпания OUTBOX_MAX_ATTEMPTS — в
+    ``dead``. ``next_retry_at`` откладывает повторный захват (экспоненциальный
+    backoff); ``processed_at`` отмечает успешную публикацию. Индекс
+    (status, next_retry_at, claimed_at) поддерживает запрос захвата воркером.
     """
 
     __tablename__ = 'outbox_messages'
     __table_args__ = (
-        Index('ix_outbox_claim', 'status', 'next_retry_at', 'created_at'),
+        Index('idx_outbox_claim', 'status', 'next_retry_at', 'claimed_at'),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -40,6 +41,10 @@ class OutboxMessageModel(Base):
     next_retry_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claimed_by: Mapped[UUID | None] = mapped_column(nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

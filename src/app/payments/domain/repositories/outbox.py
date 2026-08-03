@@ -19,34 +19,51 @@ class OutboxMessage:
     status: str
     created_at: datetime
     next_retry_at: datetime | None
+    claimed_at: datetime | None
+    claimed_by: UUID | None
     processed_at: datetime | None
 
 
 class OutboxRepository(Protocol):
     """Контракт персистентности для сообщений outbox.
 
-    Реализации должны позволять захватывать партии ожидающих сообщений без
-    их повторной обработки и атомарно фиксировать результаты публикации.
+    Захват (claim) атомарно переводит сообщение в статус ``processing`` и
+    помечает его владельца (``claimed_by``); результаты публикации фиксируются
+    условными обновлениями, чтобы другой воркер не мог пометить чужое сообщение.
     """
 
-    async def claim_batch(self, limit: int, now: datetime) -> list[OutboxMessage]:
-        """Захватить ожидающие сообщения (FOR UPDATE SKIP LOCKED).
+    async def release_expired_claims(self, now: datetime, timeout: int) -> None:
+        """Вернуть просроченные захваты в статус ``pending``.
 
-        Возвращает только активные сообщения, чей ``next_retry_at`` уже наступил.
+        Захват считается просроченным, если ``claimed_at`` старше
+        ``now - timeout`` секунд; lease снимается, чтобы упавший воркер не
+        блокировал сообщение навсегда.
         """
         ...
 
-    async def mark_processed(self, message_id: UUID) -> None:
-        """Пометить сообщение как успешно опубликованное."""
+    async def claim_batch(
+        self, limit: int, now: datetime, worker_id: UUID
+    ) -> list[OutboxMessage]:
+        """Атомарно захватить до ``limit`` активных сообщений.
+
+        Выбирает ``pending``-сообщения, чей ``next_retry_at`` наступил,
+        переводит их в ``processing`` с ``claimed_by`` и инкрементом ``attempts``.
+        """
+        ...
+
+    async def mark_processed(self, message_id: UUID, worker_id: UUID) -> None:
+        """Пометить своё захваченное сообщение как успешно опубликованное."""
 
     async def mark_publish_failure(
         self,
         message_id: UUID,
         *,
+        worker_id: UUID,
         max_attempts: int,
         next_retry_at: datetime | None,
     ) -> None:
-        """Увеличить счётчик попыток и отложить повторную публикацию.
+        """Вернуть своё сообщение в очередь или перевести в ``dead``.
 
-        При достижении ``max_attempts`` переводит сообщение в статус ``dead``.
+        Если ``attempts`` не достигли ``max_attempts``, сообщение возвращается в
+        ``pending`` с ``next_retry_at``; иначе переводится в ``dead``.
         """

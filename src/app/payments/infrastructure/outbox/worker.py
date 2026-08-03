@@ -1,16 +1,18 @@
 """Воркер публикации транзакционного outbox.
 
 Опрашивает таблицу outbox и публикует ожидающие сообщения в RabbitMQ
-с семантикой at-least-once. Захват и фиксация результата выполняются в
-коротких транзакциях, а сама публикация — вне транзакции: неудавшиеся
-сообщения получают next_retry_at (экспоненциальный backoff) и после
-исчерпания OUTBOX_MAX_ATTEMPTS переводятся в статус dead.
+с семантикой at-least-once. Захват использует lease (status=processing,
+claimed_at/claimed_by): конкурентные воркеры не обрабатывают одно сообщение
+одновременно, а после OUTBOX_CLAIM_TIMEOUT просроченные захваты снимаются.
+Публикация выполняется вне транзакций; неудавшиеся сообщения получают
+next_retry_at (экспоненциальный backoff) и после исчерпания
+OUTBOX_MAX_ATTEMPTS переводятся в статус dead.
 """
 
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from faststream.rabbit import ExchangeType, RabbitBroker, RabbitExchange
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,6 +37,7 @@ class OutboxWorker:
         self._sessionmaker = sessionmaker
         self._broker = broker
         self._settings = settings
+        self._worker_id = uuid4()
         self._uow_factory = lambda: SqlAlchemyPaymentsUnitOfWork(sessionmaker)
 
     async def run(self) -> None:
@@ -56,11 +59,16 @@ class OutboxWorker:
     async def _publish_batch(self) -> None:
         now = datetime.now(UTC)
 
-        # Шаг 1: захват — короткая транзакция, без сетевых вызовов.
+        # Шаг 1: снять просроченные lease и атомарно захватить пакет
+        # (короткая транзакция, без сетевых вызовов).
         async with self._uow_factory() as uow:
-            messages = await uow.outbox_repository.claim_batch(
-                self._settings.OUTBOX_BATCH_SIZE, now
+            await uow.outbox_repository.release_expired_claims(
+                now, self._settings.OUTBOX_CLAIM_TIMEOUT
             )
+            messages = await uow.outbox_repository.claim_batch(
+                self._settings.OUTBOX_BATCH_SIZE, now, self._worker_id
+            )
+            await uow.commit()
         if not messages:
             return
 
@@ -70,7 +78,7 @@ class OutboxWorker:
             durable=True,
         )
 
-        # Шаг 2: публикация
+        # Шаг 2: публикация — вне транзакции, чтобы не держать блокировки БД.
         published: list[UUID] = []
         failed: list[OutboxMessage] = []
         for message in messages:
@@ -90,7 +98,7 @@ class OutboxWorker:
                 logger.warning(
                     'Failed to publish outbox message %s (attempts=%d): %s',
                     message.id,
-                    message.attempts + 1,
+                    message.attempts,
                     exc,
                 )
                 metrics.outbox_messages_total.labels(status='failed').inc()
@@ -103,18 +111,20 @@ class OutboxWorker:
         if not published and not failed:
             return
 
-        # Шаг 3: фиксация результатов — короткая транзакция
+        # Шаг 3: фиксация результатов публикации — короткая транзакция.
         async with self._uow_factory() as uow:
             for message_id in published:
-                await uow.outbox_repository.mark_processed(message_id)
+                await uow.outbox_repository.mark_processed(
+                    message_id, self._worker_id
+                )
             for message in failed:
-                next_attempts = message.attempts + 1
                 await uow.outbox_repository.mark_publish_failure(
                     message.id,
+                    worker_id=self._worker_id,
                     max_attempts=self._settings.OUTBOX_MAX_ATTEMPTS,
-                    next_retry_at=self._next_retry_at(next_attempts, now),
+                    next_retry_at=self._next_retry_at(message.attempts, now),
                 )
-                if next_attempts >= self._settings.OUTBOX_MAX_ATTEMPTS:
+                if message.attempts >= self._settings.OUTBOX_MAX_ATTEMPTS:
                     metrics.outbox_messages_total.labels(status='dead').inc()
             await uow.commit()
 

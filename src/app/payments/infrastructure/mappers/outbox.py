@@ -16,6 +16,8 @@ def to_domain(row: OutboxMessageModel) -> OutboxMessage:
         status=row.status,
         created_at=row.created_at,
         next_retry_at=row.next_retry_at,
+        claimed_at=row.claimed_at,
+        claimed_by=row.claimed_by,
         processed_at=row.processed_at,
     )
 
