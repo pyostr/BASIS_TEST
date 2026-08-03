@@ -39,6 +39,20 @@ class Metrics:
             'Сообщения outbox, опубликованные в брокер',
             ['status'],
         )
+        self.outbox_claims_released_total = Counter(
+            'outbox_claims_released_total',
+            'Захваты outbox, снятые по истечении lease',
+            ['dest'],
+        )
+        self.outbox_lag_seconds = Gauge(
+            'outbox_lag_seconds',
+            'Возраст старейшего захваченного outbox-сообщения (лаг публикации), секунды',
+        )
+        self.outbox_publish_duration_seconds = Histogram(
+            'outbox_publish_duration_seconds',
+            'Длительность публикации одного outbox-сообщения в секундах',
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0),
+        )
         self.worker_cycles_total = Counter(
             'worker_cycles_total',
             'Циклы опроса воркеров',

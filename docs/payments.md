@@ -115,25 +115,32 @@ POST /api/v1/payments
 
 ```
 OutboxWorker.run() — цикл с периодом OUTBOX_POLL_INTERVAL
-  → release_expired_claims()  (status=processing, claimed_at < now − OUTBOX_CLAIM_TIMEOUT)
+  → release_expired_claims()  (status=processing, claimed_at < now − OUTBOX_CLAIM_TIMEOUT;
+                               attempts ≥ max → dead, иначе → pending)
   → claim_batch()             (UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED);
-                               pending + next_retry_at ≤ now → processing,
+                               pending + next_retry_at ≤ now + attempts < max → processing,
                                attempts+1, claimed_at/claimed_by = этот воркер)
   → uow.commit()              (захват — короткая транзакция без сетевых вызовов)
-  → publish в exchange payments.exchange, routing_key payments.new (вне транзакции)
+  → publish в exchange payments.exchange, routing_key payments.new (вне транзакции,
+    с ограниченной конкурентностью OUTBOX_PUBLISH_CONCURRENCY)
       ├─ успех → mark_processed()   (только владелец: status=processing ∧ claimed_by=id;
-      │                              processed_at = now)
+      │                              status → processed, processed_at/finished_at = now)
       └─ сбой → mark_publish_failure() (только владелец; lease снимается;
-                                        attempts < max → pending + next_retry_at (backoff),
-                                        attempts ≥ max → dead)
+                                        attempts < max → pending + next_retry_at (backoff + jitter),
+                                        attempts ≥ max → dead + finished_at)
   → uow.commit()              (фиксация результатов публикации)
+  → каждые OUTBOX_PURGE_INTERVAL циклов: reap_exhausted() + purge_processed()
+     (retention OUTBOX_RETENTION_SECONDS для статусов processed/dead)
 ```
 
 Семантика **at-least-once**: сообщение, которое не удалось опубликовать,
 будет захвачено снова при следующем опросе. **Lease** защищает от двойной
 обработки конкурентными воркерами: каждое сообщение одновременно держит только
 один воркер (status=processing + claimed_by), а зависшие захваты возвращаются
-в pending через `OUTBOX_CLAIM_TIMEOUT` секунд.
+в pending через `OUTBOX_CLAIM_TIMEOUT` секунд — при этом захваты, исчерпавшие
+`OUTBOX_MAX_ATTEMPTS`, сразу переводятся в dead, чтобы `attempts` не превысило
+лимит. Терминальные строки (processed/dead) периодически вычищаются по
+`finished_at`.
 
 ### 3. Обработка платежа (consumer)
 

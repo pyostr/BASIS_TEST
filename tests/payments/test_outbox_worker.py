@@ -35,8 +35,7 @@ async def _seed_outbox(
                     payload=payload or {'event_type': 'PaymentCreated'},
                     correlation_id='corr-1',
                     created_at=NOW,
-                    processed_at=None,
-                    **{'attempts': 0, **overrides},
+                    **{'attempts': 0, 'processed_at': None, **overrides},
                 )
             )
         await session.commit()
@@ -57,6 +56,28 @@ class _HangingBroker:
 
     async def publish(self, message, **kwargs) -> None:
         await asyncio.sleep(60)
+
+
+class _ConcurrentBroker:
+    """Брокер, фиксирующий максимальное число одновременных публикаций."""
+
+    def __init__(self) -> None:
+        self._active = 0
+        self.max_active = 0
+        self.published = []
+        self._release = asyncio.Event()
+
+    async def publish(self, message, **kwargs) -> None:
+        self._active += 1
+        self.max_active = max(self.max_active, self._active)
+        self.published.append(message)
+        try:
+            await asyncio.wait_for(self._release.wait(), timeout=2.0)
+        finally:
+            self._active -= 1
+
+    def release_all(self) -> None:
+        self._release.set()
 
 
 class TestOutboxWorker:
@@ -126,7 +147,12 @@ class TestOutboxWorker:
             assert row.next_retry_at > datetime.now(UTC)
 
             repo = SqlAlchemyOutboxRepository(lambda: session)
-            assert await repo.claim_batch(10, datetime.now(UTC), uuid7()) == []
+            assert (
+                await repo.claim_batch(
+                    10, datetime.now(UTC), uuid7(), Settings().OUTBOX_MAX_ATTEMPTS
+                )
+                == []
+            )
 
     async def test_dead_after_max_attempts(self, sessionmaker):
         """Исчерпание попыток переводит сообщение в статус dead и исключает из захвата."""
@@ -149,7 +175,12 @@ class TestOutboxWorker:
             assert row.processed_at is None
 
             repo = SqlAlchemyOutboxRepository(lambda: session)
-            assert await repo.claim_batch(10, datetime.now(UTC), uuid7()) == []
+            assert (
+                await repo.claim_batch(
+                    10, datetime.now(UTC), uuid7(), Settings().OUTBOX_MAX_ATTEMPTS
+                )
+                == []
+            )
 
     async def test_max_attempts_boundary_three_failures(self, sessionmaker):
         """OUTBOX_MAX_ATTEMPTS — число реальных попыток: dead наступает только после последней."""
@@ -179,7 +210,12 @@ class TestOutboxWorker:
             assert row.claimed_by is None
 
             repo = SqlAlchemyOutboxRepository(lambda: session)
-            assert await repo.claim_batch(10, datetime.now(UTC), uuid7()) == []
+            assert (
+                await repo.claim_batch(
+                    10, datetime.now(UTC), uuid7(), Settings().OUTBOX_MAX_ATTEMPTS
+                )
+                == []
+            )
 
     def test_next_retry_at_exponential_backoff(self):
         """Backoff использует уже увеличенный attempts: base, base*2, base*4."""
@@ -193,6 +229,56 @@ class TestOutboxWorker:
         assert worker._next_retry_at(3, now) == now + timedelta(seconds=base * 4)
         assert worker._next_retry_at(settings.OUTBOX_MAX_ATTEMPTS, now) is None
 
+    def test_next_retry_at_jitter(self):
+        """Jitter сдвигает задержку в диапазон [base, base * (1 + jitter)]."""
+        settings = Settings(OUTBOX_MAX_ATTEMPTS=5, OUTBOX_RETRY_JITTER=1.0)
+        worker = OutboxWorker(None, None, settings)
+        now = datetime.now(UTC)
+        base = settings.OUTBOX_RETRY_BASE_DELAY
+
+        for _ in range(50):
+            retry = worker._next_retry_at(1, now)
+            assert retry is not None
+            delay = (retry - now).total_seconds()
+            assert base <= delay <= base * 2
+
+    async def test_batch_publishes_concurrently(self, sessionmaker):
+        """Публикация внутри батча идёт с ограниченной конкурентностью, а не последовательно."""
+        await _seed_outbox(sessionmaker, count=3)
+        broker = _ConcurrentBroker()
+        worker = OutboxWorker(
+            sessionmaker, broker, Settings(OUTBOX_PUBLISH_CONCURRENCY=3)
+        )
+
+        task = asyncio.create_task(worker._publish_batch())
+        for _ in range(100):
+            if broker.max_active >= 3:
+                break
+            await asyncio.sleep(0.01)
+        assert broker.max_active >= 2
+
+        broker.release_all()
+        await asyncio.wait_for(task, timeout=5.0)
+        assert len(broker.published) == 3
+
+    async def test_purge_removes_terminal_rows(self, sessionmaker):
+        """Retention-чистка удаляет старые терминальные строки, не трогая pending."""
+        settings = Settings(OUTBOX_RETENTION_SECONDS=60)
+        [old_id] = await _seed_outbox(
+            sessionmaker,
+            status='processed',
+            processed_at=NOW - timedelta(hours=1),
+            finished_at=NOW - timedelta(hours=1),
+        )
+        [fresh_id] = await _seed_outbox(sessionmaker)
+
+        worker = OutboxWorker(sessionmaker, FakeBroker(), settings)
+        await worker._purge_processed()
+
+        async with sessionmaker() as session:
+            assert await session.get(OutboxMessageModel, old_id) is None
+            assert await session.get(OutboxMessageModel, fresh_id) is not None
+
     async def test_concurrent_claim_only_one_worker(self, sessionmaker):
         """Одно сообщение захватывается только одним воркером."""
         [msg_id] = await _seed_outbox(sessionmaker)
@@ -201,14 +287,20 @@ class TestOutboxWorker:
 
         async with SqlAlchemyPaymentsUnitOfWork(sessionmaker) as uow:
             claimed_a = await uow.outbox_repository.claim_batch(
-                10, datetime.now(UTC), worker_a._worker_id
+                10,
+                datetime.now(UTC),
+                worker_a._worker_id,
+                Settings().OUTBOX_MAX_ATTEMPTS,
             )
             await uow.commit()
         assert [m.id for m in claimed_a] == [msg_id]
 
         async with SqlAlchemyPaymentsUnitOfWork(sessionmaker) as uow:
             claimed_b = await uow.outbox_repository.claim_batch(
-                10, datetime.now(UTC), worker_b._worker_id
+                10,
+                datetime.now(UTC),
+                worker_b._worker_id,
+                Settings().OUTBOX_MAX_ATTEMPTS,
             )
             await uow.commit()
         assert claimed_b == []
@@ -222,7 +314,10 @@ class TestOutboxWorker:
         # worker A захватывает сообщение и «падает», не пометив результат.
         async with SqlAlchemyPaymentsUnitOfWork(sessionmaker) as uow:
             claimed = await uow.outbox_repository.claim_batch(
-                10, datetime.now(UTC), worker_a._worker_id
+                10,
+                datetime.now(UTC),
+                worker_a._worker_id,
+                Settings().OUTBOX_MAX_ATTEMPTS,
             )
             await uow.commit()
         assert len(claimed) == 1
@@ -243,6 +338,48 @@ class TestOutboxWorker:
         # Worker B снимает просроченный lease и публикует сообщение.
         await worker_b._publish_batch()
         assert len(worker_b._broker.published) == 1
+
+    async def test_worker_crash_at_max_expires_to_dead(self, sessionmaker):
+        """Crash на последней попытке: после истечения lease воркер переводит сообщение в dead, а не в pending."""
+        settings = Settings(OUTBOX_MAX_ATTEMPTS=3, OUTBOX_RETRY_BASE_DELAY=0.0)
+        [msg_id] = await _seed_outbox(sessionmaker, attempts=2)
+        worker_a = OutboxWorker(sessionmaker, FakeBroker(), settings)
+        worker_b = OutboxWorker(sessionmaker, FakeBroker(), settings)
+
+        # Worker A захватывает сообщение на последней попытке и «падает».
+        async with SqlAlchemyPaymentsUnitOfWork(sessionmaker) as uow:
+            claimed = await uow.outbox_repository.claim_batch(
+                10, datetime.now(UTC), worker_a._worker_id, settings.OUTBOX_MAX_ATTEMPTS
+            )
+            await uow.commit()
+        assert [m.id for m in claimed] == [msg_id]
+
+        # Lease истекает, worker B запускает цикл: release -> dead (попытки исчерпаны).
+        async with sessionmaker() as session:
+            await session.execute(
+                update(OutboxMessageModel)
+                .where(OutboxMessageModel.id == msg_id)
+                .values(claimed_at=datetime.now(UTC) - timedelta(seconds=301))
+            )
+            await session.commit()
+
+        await worker_b._publish_batch()
+        assert worker_b._broker.published == []
+
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row.status == 'dead'
+            assert row.attempts == settings.OUTBOX_MAX_ATTEMPTS
+            assert row.next_retry_at is None
+            assert row.finished_at is not None
+
+            repo = SqlAlchemyOutboxRepository(lambda: session)
+            assert (
+                await repo.claim_batch(
+                    10, datetime.now(UTC), uuid7(), settings.OUTBOX_MAX_ATTEMPTS
+                )
+                == []
+            )
 
     async def test_no_messages_no_publish(self, sessionmaker):
         """При отсутствии ожидающих сообщений воркер ничего не публикует."""

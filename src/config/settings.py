@@ -83,8 +83,12 @@ class Settings(BaseSettings):
     OUTBOX_BATCH_SIZE: int = 50
     OUTBOX_MAX_ATTEMPTS: int = 5
     OUTBOX_CLAIM_TIMEOUT: int = 300
+    OUTBOX_PUBLISH_CONCURRENCY: int = 10
     OUTBOX_RETRY_BASE_DELAY: float = 1.0
     OUTBOX_RETRY_MAX_DELAY: float = 60.0
+    OUTBOX_RETRY_JITTER: float = 0.0
+    OUTBOX_RETENTION_SECONDS: int = 7 * 24 * 3600
+    OUTBOX_PURGE_INTERVAL: int = 300
 
     # ----------------------------
     # ДОСТАВКА ВЕБХУКОВ
