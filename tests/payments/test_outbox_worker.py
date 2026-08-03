@@ -2,17 +2,21 @@
 и помечает их обработанными."""
 
 import asyncio
+from datetime import UTC, datetime
 
 from tests.payments.fakes import FakeBroker
 from tests.payments.helpers import NOW
 
 from src.app.payments.infrastructure.models.outbox_message import OutboxMessageModel
 from src.app.payments.infrastructure.outbox.worker import OutboxWorker
+from src.app.payments.infrastructure.repositories.outbox import (
+    SqlAlchemyOutboxRepository,
+)
 from src.config.settings import Settings
 from src.shared.utils.uuid import uuid7
 
 
-async def _seed_outbox(sessionmaker, count: int = 1, payload: dict | None = None):
+async def _seed_outbox(sessionmaker, count: int = 1, payload: dict | None = None, **overrides):
     """Вставляет count необработанных outbox-строк и возвращает их id."""
     ids = []
     async with sessionmaker() as session:
@@ -26,9 +30,9 @@ async def _seed_outbox(sessionmaker, count: int = 1, payload: dict | None = None
                     aggregate_id=uuid7(),
                     payload=payload or {'event_type': 'PaymentCreated'},
                     correlation_id='corr-1',
-                    attempts=0,
                     created_at=NOW,
                     processed_at=None,
+                    **{'attempts': 0, **overrides},
                 )
             )
         await session.commit()
@@ -90,7 +94,7 @@ class TestOutboxWorker:
         assert len(broker.published) == 3
 
     async def test_publish_failure_increments_attempts(self, sessionmaker):
-        """Неудачная публикация увеличивает счётчик попыток и оставляет сообщение необработанным."""
+        """Неудачная публикация увеличивает счётчик попыток и откладывает повторный захват."""
         [msg_id] = await _seed_outbox(sessionmaker)
         worker = OutboxWorker(sessionmaker, FakeBroker(fail=True), Settings())
 
@@ -100,7 +104,44 @@ class TestOutboxWorker:
             row = await session.get(OutboxMessageModel, msg_id)
             assert row is not None
             assert row.attempts == 1
+            assert row.status == 'pending'
+            assert row.next_retry_at is not None
             assert row.processed_at is None
+
+    async def test_failed_message_not_reclaimed_until_backoff(self, sessionmaker):
+        """Сообщение с future next_retry_at не захватывается следующим опросом."""
+        [msg_id] = await _seed_outbox(sessionmaker)
+        worker = OutboxWorker(sessionmaker, FakeBroker(fail=True), Settings())
+
+        await worker._publish_batch()
+
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row.next_retry_at > datetime.now(UTC)
+
+            repo = SqlAlchemyOutboxRepository(lambda: session)
+            assert await repo.claim_batch(10, datetime.now(UTC)) == []
+
+    async def test_dead_after_max_attempts(self, sessionmaker):
+        """Исчерпание попыток переводит сообщение в статус dead и исключает из захвата."""
+        [msg_id] = await _seed_outbox(
+            sessionmaker,
+            attempts=Settings().OUTBOX_MAX_ATTEMPTS - 1,
+        )
+        worker = OutboxWorker(sessionmaker, FakeBroker(fail=True), Settings())
+
+        await worker._publish_batch()
+
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row is not None
+            assert row.attempts == Settings().OUTBOX_MAX_ATTEMPTS
+            assert row.status == 'dead'
+            assert row.next_retry_at is None
+            assert row.processed_at is None
+
+            repo = SqlAlchemyOutboxRepository(lambda: session)
+            assert await repo.claim_batch(10, datetime.now(UTC)) == []
 
     async def test_no_messages_no_publish(self, sessionmaker):
         """При отсутствии ожидающих сообщений воркер ничего не публикует."""

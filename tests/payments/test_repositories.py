@@ -202,7 +202,7 @@ class TestPaymentRepository:
 class TestOutboxRepository:
     """Сценарии outbox-репозитория: захват пакетов и фиксация результатов публикации."""
 
-    async def _add_messages(self, sessionmaker, count: int = 1) -> list:
+    async def _add_messages(self, sessionmaker, count: int = 1, **overrides) -> list:
         """Вставляет count необработанных outbox-строк и возвращает их id."""
         ids = []
         async with sessionmaker() as session:
@@ -216,9 +216,9 @@ class TestOutboxRepository:
                         aggregate_id=uuid7(),
                         payload={'event_type': 'PaymentCreated'},
                         correlation_id='corr',
-                        attempts=0,
                         created_at=NOW,
                         processed_at=None,
+                        **{'attempts': 0, **overrides},
                     )
                 )
             await session.commit()
@@ -230,7 +230,7 @@ class TestOutboxRepository:
 
         async with sessionmaker() as session:
             repo = SqlAlchemyOutboxRepository(lambda: session)
-            claimed = await repo.claim_batch(10)
+            claimed = await repo.claim_batch(10, NOW)
             assert {m.id for m in claimed} == set(ids)
 
     async def test_claim_marks_processed(self, sessionmaker):
@@ -238,28 +238,67 @@ class TestOutboxRepository:
         [msg_id] = await self._add_messages(sessionmaker, 1)
 
         async with SqlAlchemyPaymentsUnitOfWork(sessionmaker) as uow:
-            claimed = await uow.outbox_repository.claim_batch(10)
+            claimed = await uow.outbox_repository.claim_batch(10, NOW)
             assert len(claimed) == 1
             await uow.outbox_repository.mark_processed(msg_id)
             await uow.commit()
 
         async with sessionmaker() as session:
             repo = SqlAlchemyOutboxRepository(lambda: session)
-            assert await repo.claim_batch(10) == []
+            assert await repo.claim_batch(10, NOW) == []
 
     async def test_mark_publish_failure_increments_attempts(self, sessionmaker):
-        """Фиксация сбоя публикации увеличивает счётчик попыток без пометки обработанным."""
+        """Фиксация сбоя публикации увеличивает счётчик попыток и откладывает повторный захват."""
         [msg_id] = await self._add_messages(sessionmaker, 1)
 
         async with SqlAlchemyPaymentsUnitOfWork(sessionmaker) as uow:
-            await uow.outbox_repository.mark_publish_failure(msg_id)
+            await uow.outbox_repository.mark_publish_failure(
+                msg_id, max_attempts=5, next_retry_at=NOW + timedelta(seconds=2)
+            )
             await uow.commit()
 
         async with sessionmaker() as session:
             row = await session.get(OutboxMessageModel, msg_id)
             assert row is not None
             assert row.attempts == 1
+            assert row.status == 'pending'
+            assert row.next_retry_at == NOW + timedelta(seconds=2)
             assert row.processed_at is None
+
+            repo = SqlAlchemyOutboxRepository(lambda: session)
+            assert await repo.claim_batch(10, NOW) == []
+
+    async def test_mark_publish_failure_marks_dead_at_max(self, sessionmaker):
+        """Достижение max_attempts переводит сообщение в статус dead и исключает из захвата."""
+        [msg_id] = await self._add_messages(sessionmaker, 1, attempts=2)
+
+        async with SqlAlchemyPaymentsUnitOfWork(sessionmaker) as uow:
+            await uow.outbox_repository.mark_publish_failure(
+                msg_id, max_attempts=3, next_retry_at=None
+            )
+            await uow.commit()
+
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row is not None
+            assert row.attempts == 3
+            assert row.status == 'dead'
+            assert row.next_retry_at is None
+            assert row.processed_at is None
+
+            repo = SqlAlchemyOutboxRepository(lambda: session)
+            assert await repo.claim_batch(10, NOW) == []
+
+    async def test_claim_skips_future_retry(self, sessionmaker):
+        """Сообщение с next_retry_at в будущем не захватывается, пока время не наступит."""
+        await self._add_messages(
+            sessionmaker, 1, next_retry_at=NOW + timedelta(seconds=30)
+        )
+
+        async with sessionmaker() as session:
+            repo = SqlAlchemyOutboxRepository(lambda: session)
+            assert await repo.claim_batch(10, NOW) == []
+            assert len(await repo.claim_batch(10, NOW + timedelta(seconds=31))) == 1
 
     async def test_claim_batch_skip_locked(self, sessionmaker):
         """Пока первая сессия удерживает блокировку, второй параллельный захват не видит сообщений."""
@@ -267,12 +306,12 @@ class TestOutboxRepository:
 
         async with sessionmaker() as sess_a:
             repo_a = SqlAlchemyOutboxRepository(lambda: sess_a)
-            claimed_a = await repo_a.claim_batch(10)
+            claimed_a = await repo_a.claim_batch(10, NOW)
             assert len(claimed_a) == 2
 
             async with sessionmaker() as sess_b:
                 repo_b = SqlAlchemyOutboxRepository(lambda: sess_b)
-                claimed_b = await repo_b.claim_batch(10)
+                claimed_b = await repo_b.claim_batch(10, NOW)
                 assert claimed_b == []
 
 

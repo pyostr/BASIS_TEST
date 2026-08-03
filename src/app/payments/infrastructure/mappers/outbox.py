@@ -13,7 +13,9 @@ def to_domain(row: OutboxMessageModel) -> OutboxMessage:
         payload=row.payload,
         correlation_id=row.correlation_id,
         attempts=row.attempts,
+        status=row.status,
         created_at=row.created_at,
+        next_retry_at=row.next_retry_at,
         processed_at=row.processed_at,
     )
 

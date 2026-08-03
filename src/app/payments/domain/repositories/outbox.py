@@ -16,7 +16,9 @@ class OutboxMessage:
     payload: dict[str, Any]
     correlation_id: str | None
     attempts: int
+    status: str
     created_at: datetime
+    next_retry_at: datetime | None
     processed_at: datetime | None
 
 
@@ -27,13 +29,24 @@ class OutboxRepository(Protocol):
     их повторной обработки и атомарно фиксировать результаты публикации.
     """
 
-    async def claim_batch(self, limit: int) -> list[OutboxMessage]:
-        """Захватить ожидающие сообщения (FOR UPDATE SKIP LOCKED)."""
+    async def claim_batch(self, limit: int, now: datetime) -> list[OutboxMessage]:
+        """Захватить ожидающие сообщения (FOR UPDATE SKIP LOCKED).
+
+        Возвращает только активные сообщения, чей ``next_retry_at`` уже наступил.
+        """
         ...
 
     async def mark_processed(self, message_id: UUID) -> None:
         """Пометить сообщение как успешно опубликованное."""
 
-    async def mark_publish_failure(self, message_id: UUID) -> None:
-        """Увеличить счётчик попыток, не помечая сообщение обработанным."""
-        ...
+    async def mark_publish_failure(
+        self,
+        message_id: UUID,
+        *,
+        max_attempts: int,
+        next_retry_at: datetime | None,
+    ) -> None:
+        """Увеличить счётчик попыток и отложить повторную публикацию.
+
+        При достижении ``max_attempts`` переводит сообщение в статус ``dead``.
+        """

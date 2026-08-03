@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # ----------------------------
     OUTBOX_POLL_INTERVAL: float = 1.0
     OUTBOX_BATCH_SIZE: int = 50
+    OUTBOX_MAX_ATTEMPTS: int = 5
+    OUTBOX_RETRY_BASE_DELAY: float = 1.0
+    OUTBOX_RETRY_MAX_DELAY: float = 60.0
 
     # ----------------------------
     # ДОСТАВКА ВЕБХУКОВ

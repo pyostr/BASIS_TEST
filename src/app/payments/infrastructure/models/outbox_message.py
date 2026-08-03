@@ -14,13 +14,15 @@ from src.runtime.persistence.base import Base
 class OutboxMessageModel(Base):
     """ORM-строка сохранённого доменного события, ожидающего публикации в брокер.
 
-    ``processed_at`` отмечает успешную публикацию; индекс (processed_at, created_at)
-    поддерживает запрос захвата воркером.
+    ``status`` переходит в ``dead``, когда ``attempts`` достигает
+    ``OUTBOX_MAX_ATTEMPTS``; ``next_retry_at`` откладывает повторный захват
+    (экспоненциальный backoff). ``processed_at`` отмечает успешную публикацию;
+    индекс (status, next_retry_at, created_at) поддерживает запрос захвата воркером.
     """
 
     __tablename__ = 'outbox_messages'
     __table_args__ = (
-        Index('ix_outbox_processed_created', 'processed_at', 'created_at'),
+        Index('ix_outbox_claim', 'status', 'next_retry_at', 'created_at'),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -29,8 +31,14 @@ class OutboxMessageModel(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default='pending', server_default='pending'
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
