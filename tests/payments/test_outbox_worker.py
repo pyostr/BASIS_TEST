@@ -18,7 +18,9 @@ from src.config.settings import Settings
 from src.shared.utils.uuid import uuid7
 
 
-async def _seed_outbox(sessionmaker, count: int = 1, payload: dict | None = None, **overrides):
+async def _seed_outbox(
+    sessionmaker, count: int = 1, payload: dict | None = None, **overrides
+):
     """Вставляет count необработанных outbox-строк и возвращает их id."""
     ids = []
     async with sessionmaker() as session:
@@ -148,6 +150,48 @@ class TestOutboxWorker:
 
             repo = SqlAlchemyOutboxRepository(lambda: session)
             assert await repo.claim_batch(10, datetime.now(UTC), uuid7()) == []
+
+    async def test_max_attempts_boundary_three_failures(self, sessionmaker):
+        """OUTBOX_MAX_ATTEMPTS — число реальных попыток: dead наступает только после последней."""
+        settings = Settings(OUTBOX_MAX_ATTEMPTS=3, OUTBOX_RETRY_BASE_DELAY=0.0)
+        [msg_id] = await _seed_outbox(sessionmaker)
+        worker = OutboxWorker(sessionmaker, FakeBroker(fail=True), settings)
+
+        await worker._publish_batch()
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row.attempts == 1
+            assert row.status == 'pending'
+
+        await worker._publish_batch()
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row.attempts == 2
+            assert row.status == 'pending'
+
+        await worker._publish_batch()
+        async with sessionmaker() as session:
+            row = await session.get(OutboxMessageModel, msg_id)
+            assert row.attempts == 3
+            assert row.status == 'dead'
+            assert row.next_retry_at is None
+            assert row.claimed_at is None
+            assert row.claimed_by is None
+
+            repo = SqlAlchemyOutboxRepository(lambda: session)
+            assert await repo.claim_batch(10, datetime.now(UTC), uuid7()) == []
+
+    def test_next_retry_at_exponential_backoff(self):
+        """Backoff использует уже увеличенный attempts: base, base*2, base*4."""
+        settings = Settings(OUTBOX_MAX_ATTEMPTS=5)
+        worker = OutboxWorker(None, None, settings)
+        now = datetime.now(UTC)
+        base = settings.OUTBOX_RETRY_BASE_DELAY
+
+        assert worker._next_retry_at(1, now) == now + timedelta(seconds=base)
+        assert worker._next_retry_at(2, now) == now + timedelta(seconds=base * 2)
+        assert worker._next_retry_at(3, now) == now + timedelta(seconds=base * 4)
+        assert worker._next_retry_at(settings.OUTBOX_MAX_ATTEMPTS, now) is None
 
     async def test_concurrent_claim_only_one_worker(self, sessionmaker):
         """Одно сообщение захватывается только одним воркером."""
