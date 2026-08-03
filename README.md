@@ -44,14 +44,14 @@
 
 ## Продакшен (уже развёрнуто)
 
-| Что                                 | URL                                                |
-|-------------------------------------|----------------------------------------------------|
-| Документация API (Scalar)           | https://demo-market.ru/scalar                      |
-| API (корневой адрес)                | https://demo-market.ru/api/v1                      |
-| Дашборды Grafana (admin / admin123) | https://grafana.demo-market.ru/dashboards          |
-| Дашборд «Payments Overview»         | https://grafana.demo-market.ru/d/payments-overview |
-| Healthcheck                         | https://demo-market.ru/healthz                     |
-| Вебхук уведомлений платежа          | https://smee.io/QdTdSWuNct1STc1                    |
+| Что                                  | URL                                                |
+|--------------------------------------|----------------------------------------------------|
+| Документация API (Scalar)            | https://demo-market.ru/scalar                      |
+| API (корневой адрес)                 | https://demo-market.ru/api/v1                      |
+| Дашборды Grafana (admin / admin123)  | https://grafana.demo-market.ru/dashboards          |
+| Дашборд «Payments Overview»          | https://grafana.demo-market.ru/d/payments-overview |
+| Healthcheck                          | https://demo-market.ru/healthz                     |
+| Вебхук просмотра уведомлений платежа | https://smee.io/QdTdSWuNct1STc1                    |
 
 В проде API работает по **blue-green** схеме (два контейнера, ротация без простоя),
 все внутренние сервисы (БД, RabbitMQ, consumer, Prometheus, Loki, Grafana) наружу
